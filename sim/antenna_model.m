@@ -55,14 +55,21 @@ petal = load('petal.csv');         % petal outline traced from Figure 1 (R1 regi
 petal = petal.';                   % 2 x N
 
 %% ------------------------------------------------------------------- FDTD
+% Discretisation can be overridden from the environment for convergence
+% studies; the defaults are what the reported result was produced with.
+res    = envopt('ANT_RES',  0.10);     % in-plane cell size over the board [mm]
+air    = envopt('ANT_AIR',  16);       % air padding [mm]
+nrts   = envopt('ANT_NRTS', 60000);    % max timesteps
+subcells = envopt('ANT_SUBZ', 5);      % mesh lines through the substrate
+outfile  = getenv('ANT_OUT'); if isempty(outfile), outfile = 's11.csv'; end
+
 f_min = 1e9; f_max = 14e9;
 f0 = 7.5e9; fc = 6.5e9;
-FDTD = InitFDTD('NrTs', 60000, 'EndCriteria', 1e-5);
+FDTD = InitFDTD('NrTs', nrts, 'EndCriteria', 1e-5);
 FDTD = SetGaussExcite(FDTD, f0, fc);
 FDTD = SetBoundaryCond(FDTD, {'MUR','MUR','MUR','MUR','MUR','MUR'});
 
 CSX = InitCSX();
-air = 16;                                    % air padding (~lambda/4 at 5 GHz)
 mesh.x = [-sub.a/2-air  sub.a/2+air];
 mesh.y = [-sub.a/2-air  sub.a/2+air];
 mesh.z = [-air          sub.h+air];
@@ -72,7 +79,7 @@ CSX = AddMaterial(CSX, 'FR4');
 kappa = sub.tand * 2*pi*f0 * EPS0 * sub.epsR;
 CSX = SetMaterialProperty(CSX, 'FR4', 'Epsilon', sub.epsR, 'Kappa', kappa);
 CSX = AddBox(CSX, 'FR4', 0, [-sub.a/2 -sub.a/2 0], [sub.a/2 sub.a/2 sub.h]);
-mesh.z = [mesh.z linspace(0, sub.h, 5)];
+mesh.z = [mesh.z linspace(0, sub.h, subcells)];
 
 %% ------------------------------------------------------------- top layer
 CSX = AddMetal(CSX, 'patch');
@@ -101,14 +108,13 @@ stop  = [ feed.w/2  -sub.a/2  sub.h];
 % Uniform fine grid over the antenna footprint, graded out into the air box.
 % (DetectEdges is deliberately not used on the ring polygons: their 240-point
 % arcs would seed a mesh line per vertex.)
-res = 0.10;                                   % in-plane resolution over the board
 % 12.2 / 0.10 is an integer and the feed edges (+-0.5), the ground edge (y=0)
 % and the feed end (y=-4.7) all fall exactly on grid lines, so no sliver cells
 % are created -- a single thin cell would collapse the FDTD timestep.
 mesh.x = unique([mesh.x, -sub.a/2:res:sub.a/2]);
 mesh.y = unique([mesh.y, -sub.a/2:res:sub.a/2]);
-mesh.z = unique([mesh.z, linspace(0, sub.h, 5)]);
-assert(min(diff(mesh.x)) > 0.09 && min(diff(mesh.y)) > 0.09, 'sliver cell in mesh');
+mesh.z = unique([mesh.z, linspace(0, sub.h, subcells)]);
+assert(min(diff(mesh.x)) > 0.9*res && min(diff(mesh.y)) > 0.9*res, 'sliver cell in mesh');
 fprintf('meshing (%d/%d/%d lines)...\n', numel(mesh.x), numel(mesh.y), numel(mesh.z));
 fflush(stdout);
 mesh = SmoothMesh(mesh, 1.2);
@@ -125,7 +131,7 @@ fprintf('mesh cells: %d x %d x %d = %.2f M\n', numel(mesh.x), numel(mesh.y), ...
        numel(mesh.z), numel(mesh.x)*numel(mesh.y)*numel(mesh.z)/1e6);
 
 %% --------------------------------------------------------------- run solver
-Sim_Path = 'tmp_antenna';  Sim_CSX = 'antenna.xml';
+Sim_Path = ['tmp_' strrep(outfile,'.csv','')];  Sim_CSX = 'antenna.xml';
 CleanupSimPath(Sim_Path);
 WriteOpenEMS([Sim_Path '/' Sim_CSX], FDTD, CSX);
 RunOpenEMS(Sim_Path, Sim_CSX, '--numThreads=4');
@@ -136,7 +142,7 @@ port = calcPort(port, Sim_Path, freq);
 s11  = port.uf.ref ./ port.uf.inc;
 s11dB = 20*log10(abs(s11));
 Zin  = port.uf.tot ./ port.if.tot;
-csvwrite('s11.csv', [freq(:)/1e9, s11dB(:), real(Zin(:)), imag(Zin(:))]);
+csvwrite(outfile, [freq(:)/1e9, s11dB(:), real(Zin(:)), imag(Zin(:))]);
 
 fprintf('\n===================== RESONANCES (S11 < -10 dB) =====================\n');
 for k = 2:numel(freq)-1
