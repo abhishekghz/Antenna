@@ -17,6 +17,10 @@ addpath('/opt/openEMS/share/CSXCAD/matlab');
 physical_constants;
 unit = 1e-3;                       % all lengths in mm
 
+% run from the script's own directory so petal.csv / ringpoly.m resolve
+scriptdir = fileparts(mfilename('fullpath'));
+if ~isempty(scriptdir), cd(scriptdir); end
+
 %% ------------------------------------------------------------------ geometry
 sub.a         = 12.2;              % substrate side            (paper: a)
 sub.h         = 1.5;               % substrate thickness       (paper)
@@ -97,17 +101,26 @@ stop  = [ feed.w/2  -sub.a/2  sub.h];
 % Uniform fine grid over the antenna footprint, graded out into the air box.
 % (DetectEdges is deliberately not used on the ring polygons: their 240-point
 % arcs would seed a mesh line per vertex.)
-res = 0.15;                                   % in-plane resolution over the board
-mesh.x = unique([mesh.x, -sub.a/2:res:sub.a/2, sub.a/2, [-1 1]*feed.w/2]);
-mesh.y = unique([mesh.y, -sub.a/2:res:sub.a/2, sub.a/2, -sub.a/2+gnd.h, -sub.a/2+feed.l]);
+res = 0.10;                                   % in-plane resolution over the board
+% 12.2 / 0.10 is an integer and the feed edges (+-0.5), the ground edge (y=0)
+% and the feed end (y=-4.7) all fall exactly on grid lines, so no sliver cells
+% are created -- a single thin cell would collapse the FDTD timestep.
+mesh.x = unique([mesh.x, -sub.a/2:res:sub.a/2]);
+mesh.y = unique([mesh.y, -sub.a/2:res:sub.a/2]);
 mesh.z = unique([mesh.z, linspace(0, sub.h, 5)]);
+assert(min(diff(mesh.x)) > 0.09 && min(diff(mesh.y)) > 0.09, 'sliver cell in mesh');
+fprintf('meshing (%d/%d/%d lines)...\n', numel(mesh.x), numel(mesh.y), numel(mesh.z));
+fflush(stdout);
 mesh = SmoothMesh(mesh, 1.2);
+fprintf('mesh done, min cell %.3f mm\n', min([diff(mesh.x) diff(mesh.y) diff(mesh.z)]));
+fflush(stdout);
 CSX = DefineRectGrid(CSX, unit, mesh);
 
 nf2ff_start = [mesh.x(4) mesh.y(4) mesh.z(4)];
 nf2ff_stop  = [mesh.x(end-3) mesh.y(end-3) mesh.z(end-3)];
 [CSX nf2ff] = CreateNF2FFBox(CSX, 'nf2ff', nf2ff_start, nf2ff_stop);
 
+fflush(stdout);
 fprintf('mesh cells: %d x %d x %d = %.2f M\n', numel(mesh.x), numel(mesh.y), ...
        numel(mesh.z), numel(mesh.x)*numel(mesh.y)*numel(mesh.z)/1e6);
 
