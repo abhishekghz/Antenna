@@ -1,0 +1,4 @@
+# openEMS run output
+sim/tmp_*/
+sim/*.log
+octave-workspace
