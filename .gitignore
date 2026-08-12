@@ -8,3 +8,4 @@ sim/ml/tmp_verify*/
 sim/ml/verify*.log
 paper/node_modules/
 sim/ml/*.log
+sim/ml/tmp_*/
