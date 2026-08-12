@@ -28,7 +28,7 @@ RES   = ev('SWEEP_RES',  0.2);    % in-plane cell size [mm]
 AIR   = ev('SWEEP_AIR',  10);     % air padding [mm]
 SUBZ  = ev('SWEEP_SUBZ', 5);      % mesh lines through the substrate
 NRTS  = ev('SWEEP_NRTS', 20000);  % max timesteps
-NF    = 201;        % frequency samples stored per design
+NF    = ev('SWEEP_FREQPTS', 201);   % frequency samples stored per design
 FLO   = 3e9; FHI = 13e9;
 
 % ---- fixed geometry (not design variables) --------------------------------
