@@ -65,13 +65,19 @@ lo = torch.tensor(LO, dtype=torch.float32)
 hi = torch.tensor(HI, dtype=torch.float32)
 
 
-def s11_of(p):
-    """Differentiable S11 curve, ensemble mean, for a batch of designs."""
-    b = p.shape[0]
+def s11_of(p, cols=None):
+    """Differentiable S11, ensemble mean, for a batch of designs.
+
+    cols selects which frequency samples to evaluate. The optimiser only looks
+    at a handful of frequencies around the target, and evaluating all 201 there
+    costs ~40x more for no benefit.
+    """
+    sel = ff if cols is None else ff[cols]
+    m, b = sel.shape[0], p.shape[0]
     xn = (p - xmu) / xsd
-    x = torch.cat([xn.repeat_interleave(NF, 0), ff.repeat(b, 1)], 1)
+    x = torch.cat([xn.repeat_interleave(m, 0), sel.repeat(b, 1)], 1)
     y = torch.stack([n(x) for n in nets]).mean(0)
-    return y.reshape(b, NF) * ck['ysd'] + ck['ymu']
+    return y.reshape(b, m) * ck['ysd'] + ck['ymu']
 
 
 def penalty(p):
@@ -99,14 +105,18 @@ g = torch.Generator().manual_seed(3)
 raw = torch.logit(torch.rand(NSTART, 6, generator=g).clamp(0.02, 0.98)).requires_grad_(True)
 opt = torch.optim.Adam([raw], lr=0.05)
 
+cols = sorted({c for i in tidx for c in range(max(0, i - 2), min(NF, i + 3))})
+colmap = {c: j for j, c in enumerate(cols)}
+colsel = torch.tensor(cols)
+
 for step in range(400):
     opt.zero_grad()
     p = lo + (hi - lo) * torch.sigmoid(raw)
-    s = s11_of(p)
+    s = s11_of(p, colsel)
     obj = 0
     for i in tidx:
-        w = slice(max(0, i - 2), min(NF, i + 3))
-        obj = obj + s[:, w].mean(-1)
+        j = [colmap[c] for c in range(max(0, i - 2), min(NF, i + 3))]
+        obj = obj + s[:, j].mean(-1)
     (obj + penalty(p)).sum().backward()
     opt.step()
 
