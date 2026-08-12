@@ -12,7 +12,8 @@ to the geometry actually simulated.
 import numpy as np, csv, sys
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 300
-SEED = 20260812
+APPEND = '--append' in sys.argv      # keep existing rows, top up to N
+SEED = 20260812 if not APPEND else 20260813
 RES = 0.2                      # FDTD in-plane cell size used for the sweep
 A = 12.2                       # substrate side
 PETAL_R = 2.04                 # max radius of the traced petal at scale 1.0
@@ -54,6 +55,13 @@ def lhs(n, k, rng):
     return u
 
 
+existing = None
+if APPEND:
+    import os
+    if os.path.exists('designs.csv'):
+        existing = np.loadtxt('designs.csv', delimiter=',', skiprows=1, ndmin=2)
+        print('keeping %d already-simulated designs' % len(existing))
+
 rng = np.random.default_rng(SEED)
 lo = np.array([v[1] for v in VARS])
 hi = np.array([v[2] for v in VARS])
@@ -72,9 +80,14 @@ while len(kept) < N and tries < 200:
     tries += 1
 
 D = np.array(kept[:N])
-# Put the published (nominal) design first so it is always simulated.
-nom = np.array([v[3] for v in VARS]); nom[5] = round(nom[5] / RES) * RES
-D = np.vstack([nom, D[:N - 1]])
+if existing is not None:
+    # Existing rows keep their indices: run_sweep.m addresses designs by row
+    # number and skips those already present in the results.
+    need = max(0, N - len(existing))
+    D = np.vstack([existing, D[:need]])
+else:
+    nom = np.array([v[3] for v in VARS]); nom[5] = round(nom[5] / RES) * RES
+    D = np.vstack([nom, D[:N - 1]])
 
 with open('designs.csv', 'w', newline='') as fh:
     wcsv = csv.writer(fh)

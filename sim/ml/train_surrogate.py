@@ -1,16 +1,30 @@
-"""Train a neural surrogate: 6 antenna dimensions -> full S11(f) response.
+"""Train a neural surrogate for the antenna's reflection response.
 
-The network predicts a PCA-compressed representation of the S11 curve rather
-than all 201 frequency samples directly. With a few hundred training designs
-that is the difference between a model that generalises and one that memorises:
-the curves live on a low-dimensional manifold (a handful of resonances sliding
-around), so ~20 components capture essentially all the variance while cutting
-the output dimension by an order of magnitude.
+The network maps (6 design dimensions, frequency) -> S11 at that frequency,
+rather than dimensions -> the whole 201-point curve.
+
+That choice matters. The obvious formulation -- compress the curve with PCA and
+regress the coefficients -- fails badly here, and the dataset shows why:
+
+  * The resonances are narrow and they *slide* with geometry. A moving sharp
+    feature is not a low-rank phenomenon, so PCA needs ~60 components for 98.6%
+    of the variance instead of the handful one might expect.
+  * The number of resonances is not constant over the design space: of 300
+    designs, 12 have none, 87 have one, 119 two, 56 three, and 26 have four or
+    more. There is no fixed-length target that describes every design.
+  * Only 4.8% of each curve lies below -10 dB, so a model that predicts "flat"
+    scores well on curve error while being useless for design.
+
+Treating frequency as an input solves all three: arbitrary band structure is
+representable, every design contributes 201 training rows instead of one, and
+Fourier features give the network the spatial frequency it needs to place sharp
+nulls. The model stays differentiable in the design variables, so it can still
+be inverted (see inverse_design.py).
 
 Outputs
-  surrogate.pt        trained weights + normalisation constants
-  surrogate_fit.png   predicted vs simulated curves on held-out designs
-  surrogate_parity.png parity plot of resonant frequency and depth
+  surrogate.pt          weights + normalisation constants
+  surrogate_fit.png     predicted vs simulated curves, held-out designs
+  surrogate_parity.png  parity plot of held-out resonant frequencies
 """
 import glob
 import numpy as np
@@ -26,145 +40,160 @@ rng = np.random.default_rng(SEED)
 
 NAMES = ['out_R', 'ring_w', 'hex_R', 'gap_l1', 'petal_s', 'gnd_h']
 FLO, FHI, NF = 3.0, 13.0, 201
+NFOURIER = 48
 freq = np.linspace(FLO, FHI, NF)
 
 # ---------------------------------------------------------------- load data
-rows = []
-for fn in sorted(glob.glob('sweep_s11_*.csv')):
-    d = np.loadtxt(fn, delimiter=',', ndmin=2)
-    if d.size:
-        rows.append(d)
-D = np.vstack(rows)
+D = np.vstack([np.loadtxt(f, delimiter=',', ndmin=2)
+               for f in sorted(glob.glob('sweep_s11_*.csv'))])
 D = D[np.argsort(D[:, 0])]
 _, uniq = np.unique(D[:, 0], return_index=True)
 D = D[uniq]
-X = D[:, 1:7]
-Y = D[:, 7:]
-print('dataset: %d designs, %d frequency samples' % X.shape[0:1] + (Y.shape[1],))
+X, Y = D[:, 1:7], np.clip(D[:, 7:], -45.0, 0.0)
+ndes = len(X)
+print('dataset: %d designs x %d frequencies = %d samples' % (ndes, NF, ndes * NF))
 
-# Clip the extreme tail: values below -45 dB are numerically noisy nulls and
-# would otherwise dominate the loss without carrying design information.
-Y = np.clip(Y, -45.0, 0.0)
-
-# ------------------------------------------------------------------ splits
-n = len(X)
-perm = rng.permutation(n)
-ntest = max(12, int(0.15 * n))
-nval = max(12, int(0.15 * n))
+# Split by DESIGN, never by sample: rows from one design are near-duplicates,
+# so a random row split would leak the answer into the test set.
+perm = rng.permutation(ndes)
+ntest = nval = int(0.15 * ndes)
 itest, ival, itrain = perm[:ntest], perm[ntest:ntest + nval], perm[ntest + nval:]
-print('split: %d train / %d val / %d test' % (len(itrain), len(ival), len(itest)))
+print('split by design: %d train / %d val / %d test' % (len(itrain), len(ival), len(itest)))
 
-# --------------------------------------------------- normalisation and PCA
 xmu, xsd = X[itrain].mean(0), X[itrain].std(0) + 1e-9
-Xn = (X - xmu) / xsd
+ymu, ysd = Y[itrain].mean(), Y[itrain].std()
 
-ymu = Y[itrain].mean(0)
-Yc = Y - ymu
-U, S, Vt = np.linalg.svd(Yc[itrain], full_matrices=False)
-NC = int(np.searchsorted(np.cumsum(S**2) / np.sum(S**2), 0.995) + 1)
-NC = max(8, min(NC, 30))
-basis = Vt[:NC]                       # (NC, NF)
-Z = Yc @ basis.T
-zsd = Z[itrain].std(0) + 1e-9
-print('PCA: %d components, %.2f%% of variance'
-      % (NC, 100 * np.sum(S[:NC]**2) / np.sum(S**2)))
+fn = (freq - FLO) / (FHI - FLO)
+k = np.arange(1, NFOURIER + 1)[:, None]
+FF = np.concatenate([fn[None, :] * 0 + fn[None, :],
+                     np.sin(2 * np.pi * k * fn),
+                     np.cos(2 * np.pi * k * fn)], 0).T          # (NF, 1+2K)
+print('frequency encoding: %d features' % FF.shape[1])
+
+
+def weights(yv):
+    # Plain MSE spends its capacity on the ~95% of each curve that sits near
+    # 0 dB, and smooths away the narrow nulls that are the whole point. Weight
+    # the matched region so the resonances actually drive the fit.
+    return 1.0 + 6.0 / (1.0 + np.exp((yv + 5.0) / 1.5))
+
+
+def build(idx):
+    xn = (X[idx] - xmu) / xsd                                    # (n, 6)
+    n = len(idx)
+    a = np.repeat(xn, NF, axis=0)
+    b = np.tile(FF, (n, 1))
+    yraw = Y[idx].reshape(-1, 1)
+    y = ((yraw - ymu) / ysd)
+    w = weights(yraw)
+    return (torch.tensor(np.hstack([a, b]), dtype=torch.float32),
+            torch.tensor(y, dtype=torch.float32),
+            torch.tensor(w, dtype=torch.float32))
 
 
 class Net(nn.Module):
-    def __init__(self, nin, nout):
+    def __init__(self, nin):
         super().__init__()
         self.f = nn.Sequential(
-            nn.Linear(nin, 128), nn.SiLU(),
-            nn.Linear(128, 256), nn.SiLU(),
+            nn.Linear(nin, 256), nn.SiLU(),
             nn.Linear(256, 256), nn.SiLU(),
-            nn.Linear(256, 128), nn.SiLU(),
-            nn.Linear(128, nout))
+            nn.Linear(256, 256), nn.SiLU(),
+            nn.Linear(256, 1))
 
     def forward(self, x):
         return self.f(x)
 
 
-def tt(a):
-    return torch.tensor(a, dtype=torch.float32)
-
-
-net = Net(6, NC)
-opt = torch.optim.AdamW(net.parameters(), lr=3e-3, weight_decay=1e-4)
-sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=4000)
-xtr, ztr = tt(Xn[itrain]), tt(Z[itrain] / zsd)
-xva, zva = tt(Xn[ival]), tt(Z[ival] / zsd)
+xtr, ytr, wtr = build(itrain)
+xva, yva, wva = build(ival)
+net = Net(xtr.shape[1])
+opt = torch.optim.AdamW(net.parameters(), lr=2e-3, weight_decay=1e-5)
+EPOCHS, BS = 400, 1024
+sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS)
 
 best, beststate, bad = 1e9, None, 0
-for ep in range(4000):
-    net.train(); opt.zero_grad()
-    loss = nn.functional.mse_loss(net(xtr), ztr)
-    loss.backward(); opt.step(); sched.step()
-    if ep % 20 == 0:
-        net.eval()
-        with torch.no_grad():
-            vl = nn.functional.mse_loss(net(xva), zva).item()
-        if vl < best - 1e-5:
-            best, beststate, bad = vl, {k: v.clone() for k, v in net.state_dict().items()}, 0
-        else:
-            bad += 1
-        if ep % 400 == 0:
-            print('  epoch %4d  train %.4f  val %.4f' % (ep, loss.item(), vl))
-        if bad > 40:
-            print('  early stop at epoch %d' % ep)
-            break
+for ep in range(EPOCHS):
+    net.train()
+    p = torch.randperm(len(xtr))
+    for i in range(0, len(p), BS):
+        j = p[i:i + BS]
+        opt.zero_grad()
+        (wtr[j] * (net(xtr[j]) - ytr[j]) ** 2).mean().backward()
+        opt.step()
+    sched.step()
+    net.eval()
+    with torch.no_grad():
+        vl = (wva * (net(xva) - yva) ** 2).mean().item()
+    if vl < best - 1e-6:
+        best, beststate, bad = vl, {k_: v.clone() for k_, v in net.state_dict().items()}, 0
+    else:
+        bad += 1
+    if ep % 40 == 0:
+        print('  epoch %3d  val MSE %.4f  (val MAE %.2f dB)' % (ep, vl, np.sqrt(vl) * ysd))
+    if bad > 80:
+        print('  early stop at epoch %d' % ep)
+        break
 net.load_state_dict(beststate)
 net.eval()
 
 
-def predict(Xraw):
+def predict(idx):
+    x = build(idx)[0]
     with torch.no_grad():
-        z = net(tt((Xraw - xmu) / xsd)).numpy() * zsd
-    return z @ basis + ymu
+        return (net(x).numpy().reshape(len(idx), NF) * ysd) + ymu
 
 
-# ------------------------------------------------------------- evaluation
-Yp = predict(X)
-err = np.abs(Yp - Y)
+print()
 for lab, idx in [('train', itrain), ('val', ival), ('test', itest)]:
-    print('%-5s  curve MAE %5.2f dB   RMSE %5.2f dB'
-          % (lab, err[idx].mean(), np.sqrt(((Yp[idx] - Y[idx])**2).mean())))
+    P = predict(idx)
+    print('%-5s  curve MAE %5.2f dB   RMSE %5.2f dB' %
+          (lab, np.abs(P - Y[idx]).mean(), np.sqrt(((P - Y[idx]) ** 2).mean())))
 
 
-def resonances(s11, kmax=3):
-    """Return the kmax deepest local minima below -10 dB, sorted by frequency."""
-    out = []
-    for i in range(1, len(s11) - 1):
-        if s11[i] < -10 and s11[i] <= s11[i - 1] and s11[i] <= s11[i + 1]:
-            out.append((s11[i], freq[i]))
+def resonances(s, kmax=4):
+    out = [(s[i], freq[i]) for i in range(1, NF - 1)
+           if s[i] < -10 and s[i] <= s[i - 1] and s[i] <= s[i + 1]]
     out.sort()
     return sorted(f for _, f in out[:kmax])
 
 
-ft, fp = [], []
-for i in itest:
-    a, b = resonances(Y[i]), resonances(Yp[i])
-    for k in range(min(len(a), len(b))):
-        ft.append(a[k]); fp.append(b[k])
+Pte = predict(itest)
+ft, fp, missed, spurious = [], [], 0, 0
+for r, i in enumerate(itest):
+    a, b = resonances(Y[i]), resonances(Pte[r])
+    used = set()
+    for fa in a:
+        if not b:
+            missed += 1
+            continue
+        j = int(np.argmin([abs(fb - fa) for fb in b]))
+        if abs(b[j] - fa) < 0.6 and j not in used:
+            ft.append(fa); fp.append(b[j]); used.add(j)
+        else:
+            missed += 1
+    spurious += max(0, len(b) - len(used))
 ft, fp = np.array(ft), np.array(fp)
+nband = sum(len(resonances(Y[i])) for i in itest)
+print('\nheld-out band recovery: %d/%d matched within 600 MHz, %d missed, %d spurious'
+      % (len(ft), nband, missed, spurious))
 if len(ft):
-    print('resonant frequency: MAE %.3f GHz on %d held-out bands (%.2f%% of centre)'
-          % (np.abs(fp - ft).mean(), len(ft), 100 * np.abs(fp - ft).mean() / ft.mean()))
+    print('matched-band frequency MAE: %.3f GHz (%.1f%% of centre)'
+          % (np.abs(fp - ft).mean(), 100 * np.abs(fp - ft).mean() / ft.mean()))
 
-# ----------------------------------------------------------------- figures
-show = itest[:6]
 fig, axes = plt.subplots(2, 3, figsize=(13, 6.5), sharex=True, sharey=True)
-for ax, i in zip(axes.ravel(), show):
+for ax, r in zip(axes.ravel(), range(6)):
+    i = itest[r]
     ax.plot(freq, Y[i], color='#1f4e79', lw=1.6, label='openEMS')
-    ax.plot(freq, Yp[i], color='#c00000', lw=1.4, ls='--', label='surrogate')
+    ax.plot(freq, Pte[r], color='#c00000', lw=1.4, ls='--', label='surrogate')
     ax.axhline(-10, color='0.6', lw=.8, ls=':')
-    ax.set_title(', '.join('%s=%.2f' % (n, v) for n, v in zip(NAMES[:3], X[i][:3])), fontsize=7)
+    ax.set_title(', '.join('%s=%.2f' % (n, v) for n, v in zip(NAMES, X[i]))[:58], fontsize=6.5)
     ax.grid(alpha=.3)
 axes[0, 0].legend(fontsize=8)
 for ax in axes[1]:
     ax.set_xlabel('frequency [GHz]')
 for ax in axes[:, 0]:
     ax.set_ylabel('$|S_{11}|$ [dB]')
-fig.suptitle('Neural surrogate vs. full-wave simulation on held-out designs', fontsize=12)
+fig.suptitle('Neural surrogate vs. full-wave simulation, held-out designs', fontsize=12)
 fig.tight_layout(); fig.savefig('surrogate_fit.png', dpi=140)
 
 if len(ft):
@@ -175,7 +204,6 @@ if len(ft):
     ax.set_title('Held-out resonant frequencies'); ax.grid(alpha=.3); ax.set_aspect(1)
     fig2.tight_layout(); fig2.savefig('surrogate_parity.png', dpi=140)
 
-torch.save({'state': net.state_dict(), 'xmu': xmu, 'xsd': xsd, 'ymu': ymu,
-            'basis': basis, 'zsd': zsd, 'nc': NC, 'freq': freq, 'names': NAMES},
-           'surrogate.pt')
+torch.save({'state': net.state_dict(), 'xmu': xmu, 'xsd': xsd, 'ymu': ymu, 'ysd': ysd,
+            'FF': FF, 'freq': freq, 'names': NAMES, 'nin': xtr.shape[1]}, 'surrogate.pt')
 print('saved surrogate.pt')
