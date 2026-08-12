@@ -145,12 +145,17 @@ Zin  = port.uf.tot ./ port.if.tot;
 csvwrite(outfile, [freq(:)/1e9, s11dB(:), real(Zin(:)), imag(Zin(:))]);
 
 fprintf('\n===================== RESONANCES (S11 < -10 dB) =====================\n');
+% Band edges are interpolated onto the -10 dB crossing. Taking the nearest
+% sample instead biases the bandwidth by up to two frequency steps, which is
+% tens of MHz here -- the same order as the bandwidths themselves.
 for k = 2:numel(freq)-1
   if s11dB(k) < -10 && s11dB(k) < s11dB(k-1) && s11dB(k) <= s11dB(k+1)
-    lo = k; while lo>1 && s11dB(lo)<-10, lo=lo-1; end
-    hi = k; while hi<numel(freq) && s11dB(hi)<-10, hi=hi+1; end
-    fprintf('  f = %6.2f GHz   S11 = %7.2f dB   BW(-10dB) = %5.0f MHz\n', ...
-           freq(k)/1e9, s11dB(k), (freq(hi)-freq(lo))/1e6);
+    lo = k; while lo > 1 && s11dB(lo) < -10, lo = lo - 1; end
+    hi = k; while hi < numel(freq) && s11dB(hi) < -10, hi = hi + 1; end
+    flo = freq(lo) + (freq(lo+1)-freq(lo)) * (-10 - s11dB(lo)) / (s11dB(lo+1) - s11dB(lo));
+    fhi = freq(hi-1) + (freq(hi)-freq(hi-1)) * (-10 - s11dB(hi-1)) / (s11dB(hi) - s11dB(hi-1));
+    fprintf('  f = %6.2f GHz   S11 = %7.2f dB   BW(-10dB) = %5.0f MHz (%.1f%%)\n', ...
+            freq(k)/1e9, s11dB(k), (fhi-flo)/1e6, 100*(fhi-flo)/freq(k));
   end
 end
 fprintf('====================================================================\n');

@@ -27,16 +27,34 @@ ax[1].set_ylabel('$Z_{in}$  [$\\Omega$]'); ax[1].grid(alpha=.3); ax[1].legend(fo
 fig.tight_layout(); fig.savefig('s11_comparison.png', dpi=140)
 print('wrote s11_comparison.png')
 
-below = s11 < -10
-if below.any():
-    print('\n-10 dB bands:')
-    edges = np.diff(below.astype(int))
-    starts = list(np.where(edges == 1)[0] + 1); stops = list(np.where(edges == -1)[0])
-    if below[0]: starts = [0] + starts
-    if below[-1]: stops = stops + [len(f) - 1]
-    for a, b in zip(starts, stops):
-        k = a + int(np.argmin(s11[a:b + 1]))
-        print('  %5.2f - %5.2f GHz   min %6.2f dB at %5.2f GHz   BW %4.0f MHz'
-              % (f[a], f[b], s11[k], f[k], (f[b] - f[a]) * 1000))
+def bands(f, s, thr=-10.0):
+    """-10 dB bands with interpolated edges.
+
+    Using the nearest sample instead biases the bandwidth by up to two
+    frequency steps, which here is the same order as the bandwidths themselves.
+    """
+    out, i = [], 0
+    while i < len(f) - 1:
+        if (s[i] - thr) * (s[i + 1] - thr) < 0 and s[i + 1] < s[i]:
+            lo = f[i] + (f[i + 1] - f[i]) * (thr - s[i]) / (s[i + 1] - s[i])
+            for j in range(i + 1, len(f) - 1):
+                if (s[j] - thr) * (s[j + 1] - thr) < 0 and s[j + 1] > s[j]:
+                    hi = f[j] + (f[j + 1] - f[j]) * (thr - s[j]) / (s[j + 1] - s[j])
+                    k = i + int(np.argmin(s[i:j + 2]))
+                    out.append((f[k], s[k], lo, hi))
+                    i = j
+                    break
+            else:
+                break
+        i += 1
+    return out
+
+
+bb = bands(f, s11)
+if bb:
+    print('\n-10 dB bands (interpolated edges):')
+    for c, dep, lo, hi in bb:
+        print('  %5.2f - %5.2f GHz   min %6.2f dB at %5.2f GHz   BW %5.1f MHz (%.2f%%)'
+              % (lo, hi, dep, c, (hi - lo) * 1000, 100 * (hi - lo) / c))
 else:
     print('\nno -10 dB band found')
