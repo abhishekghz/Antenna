@@ -2,3 +2,5 @@
 sim/tmp_*/
 sim/*.log
 octave-workspace
+sim/ml/tmp_sweep*/
+sim/ml/shard*.log
