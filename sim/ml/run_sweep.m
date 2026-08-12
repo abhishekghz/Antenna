@@ -17,10 +17,17 @@ addpath(fileparts(pwd));            % ringpoly.m lives one level up
 physical_constants;
 unit = 1e-3;
 
-RES   = 0.2;        % in-plane cell size [mm]  (12.2/61, keeps feed edges on grid)
-AIR   = 10;         % air padding [mm]
-SUBZ  = 5;          % mesh lines through the substrate
-NRTS  = 20000;      % max timesteps
+% Sweep fidelity is deliberately coarse; override from the environment to
+% re-run selected designs (e.g. an inverse-design candidate) at the reference
+% fidelity used by ../antenna_model.m before trusting the result.
+function v = ev(name, dflt)
+  s = getenv(name);
+  if isempty(s), v = dflt; else, v = str2double(s); end
+end
+RES   = ev('SWEEP_RES',  0.2);    % in-plane cell size [mm]
+AIR   = ev('SWEEP_AIR',  10);     % air padding [mm]
+SUBZ  = ev('SWEEP_SUBZ', 5);      % mesh lines through the substrate
+NRTS  = ev('SWEEP_NRTS', 20000);  % max timesteps
 NF    = 201;        % frequency samples stored per design
 FLO   = 3e9; FHI = 13e9;
 
@@ -31,7 +38,8 @@ srr.cx = 3.00; srr.cy = 2.90; srr.R2 = 2.53; srr.w = 0.55;
 srr.Rin_out = 1.53; srr.R3in = 0.98; srr.gap_out = 0.80; srr.gap_in = 0.35;
 petal0 = load('../petal.csv').';
 
-designs = csvread('designs.csv', 1, 0);
+dfile = getenv('SWEEP_DESIGNS'); if isempty(dfile), dfile = 'designs.csv'; end
+designs = csvread(dfile, 1, 0);
 ndes = rows(designs);
 
 % Shard the sweep across independent Octave processes. Small meshes thread
@@ -40,7 +48,8 @@ shard  = str2double(getenv('SWEEP_SHARD'));  if isnan(shard),  shard  = 0; end
 nshard = str2double(getenv('SWEEP_NSHARD')); if isnan(nshard), nshard = 1; end
 freq = linspace(FLO, FHI, NF);
 
-outfile = sprintf('sweep_s11_%d.csv', shard);
+otag = getenv('SWEEP_TAG'); if isempty(otag), otag = 'sweep'; end
+outfile = sprintf('%s_s11_%d.csv', otag, shard);
 done = [];
 if exist(outfile, 'file')
     prev = csvread(outfile);
@@ -98,7 +107,7 @@ for k = 1:ndes
     end
     CSX = DefineRectGrid(CSX, unit, mesh);
 
-    Sim_Path = sprintf('tmp_sweep_%d', shard);
+    Sim_Path = sprintf('tmp_%s_%d', otag, shard);
     CleanupSimPath(Sim_Path);
     WriteOpenEMS([Sim_Path '/s.xml'], FDTD, CSX);
     RunOpenEMS(Sim_Path, 's.xml', '--numThreads=1');

@@ -40,7 +40,8 @@ rng = np.random.default_rng(SEED)
 
 NAMES = ['out_R', 'ring_w', 'hex_R', 'gap_l1', 'petal_s', 'gnd_h']
 FLO, FHI, NF = 3.0, 13.0, 201
-NFOURIER = 48
+NFOURIER = 32
+NENSEMBLE = 5
 freq = np.linspace(FLO, FHI, NF)
 
 # ---------------------------------------------------------------- load data
@@ -106,41 +107,49 @@ class Net(nn.Module):
 
 xtr, ytr, wtr = build(itrain)
 xva, yva, wva = build(ival)
-net = Net(xtr.shape[1])
-opt = torch.optim.AdamW(net.parameters(), lr=2e-3, weight_decay=1e-5)
-EPOCHS, BS = 400, 1024
-sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS)
 
-best, beststate, bad = 1e9, None, 0
-for ep in range(EPOCHS):
-    net.train()
-    p = torch.randperm(len(xtr))
-    for i in range(0, len(p), BS):
-        j = p[i:i + BS]
-        opt.zero_grad()
-        (wtr[j] * (net(xtr[j]) - ytr[j]) ** 2).mean().backward()
-        opt.step()
-    sched.step()
+# The Fourier encoding lets each net place sharp nulls, but it also lets each
+# net ring in the flat regions -- and that ringing is what produces spurious
+# sub-10 dB crossings. The ringing is uncorrelated between random seeds while
+# the real resonances are not, so averaging an ensemble suppresses one and
+# keeps the other.
+nets = []
+for member in range(NENSEMBLE):
+    torch.manual_seed(SEED + 100 * member)
+    net = Net(xtr.shape[1])
+    opt = torch.optim.AdamW(net.parameters(), lr=2e-3, weight_decay=1e-5)
+    EPOCHS, BS = 400, 1024
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS)
+    best, beststate, bad = 1e9, None, 0
+    for ep in range(EPOCHS):
+        net.train()
+        p = torch.randperm(len(xtr))
+        for i in range(0, len(p), BS):
+            j = p[i:i + BS]
+            opt.zero_grad()
+            (wtr[j] * (net(xtr[j]) - ytr[j]) ** 2).mean().backward()
+            opt.step()
+        sched.step()
+        net.eval()
+        with torch.no_grad():
+            vl = (wva * (net(xva) - yva) ** 2).mean().item()
+        if vl < best - 1e-6:
+            best, beststate, bad = vl, {k_: v.clone() for k_, v in net.state_dict().items()}, 0
+        else:
+            bad += 1
+        if bad > 80:
+            break
+    net.load_state_dict(beststate)
     net.eval()
-    with torch.no_grad():
-        vl = (wva * (net(xva) - yva) ** 2).mean().item()
-    if vl < best - 1e-6:
-        best, beststate, bad = vl, {k_: v.clone() for k_, v in net.state_dict().items()}, 0
-    else:
-        bad += 1
-    if ep % 40 == 0:
-        print('  epoch %3d  val MSE %.4f  (val MAE %.2f dB)' % (ep, vl, np.sqrt(vl) * ysd))
-    if bad > 80:
-        print('  early stop at epoch %d' % ep)
-        break
-net.load_state_dict(beststate)
-net.eval()
+    nets.append(net)
+    print('  member %d/%d  best val MSE %.4f' % (member + 1, NENSEMBLE, best))
 
 
 def predict(idx):
     x = build(idx)[0]
     with torch.no_grad():
-        return (net(x).numpy().reshape(len(idx), NF) * ysd) + ymu
+        m = np.mean([n(x).numpy() for n in nets], axis=0)
+    return (m.reshape(len(idx), NF) * ysd) + ymu
 
 
 print()
@@ -204,6 +213,6 @@ if len(ft):
     ax.set_title('Held-out resonant frequencies'); ax.grid(alpha=.3); ax.set_aspect(1)
     fig2.tight_layout(); fig2.savefig('surrogate_parity.png', dpi=140)
 
-torch.save({'state': net.state_dict(), 'xmu': xmu, 'xsd': xsd, 'ymu': ymu, 'ysd': ysd,
+torch.save({'states': [n.state_dict() for n in nets], 'xmu': xmu, 'xsd': xsd, 'ymu': ymu, 'ysd': ysd,
             'FF': FF, 'freq': freq, 'names': NAMES, 'nin': xtr.shape[1]}, 'surrogate.pt')
 print('saved surrogate.pt')
