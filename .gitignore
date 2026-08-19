@@ -11,3 +11,5 @@ sim/ml/*.log
 sim/ml/tmp_*/
 paper/package.json
 paper/package-lock.json
+paper/
+paper_markers.csv

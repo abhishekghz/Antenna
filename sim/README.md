@@ -18,9 +18,8 @@ a MATLAB-only setup.
 | `ringpoly.m` | helper — builds a split-ring polygon (circular or hexagonal) |
 | `petal.csv` | petal outline traced from Figure 1, 25-point polygon in mm |
 | `preview_geometry.py` | draws the reconstructed layout for visual comparison with Figure 1 |
-| `plot_results.py` | plots S11 and overlays the three resonances the paper reports |
+| `plot_results.py` | plots S11, with optional reference markers from a local file |
 | `validate_ref_patch.m` | toolchain check — a patch with a known 2.4 GHz resonance |
-| `GEOMETRY_NOTES.md` | how every dimension was recovered, and where the paper is inconsistent |
 
 ## Running it
 

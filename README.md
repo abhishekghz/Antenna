@@ -14,8 +14,8 @@ commercial licence.
    Figure 1 of the paper
             |
             v
-  [1] geometry reconstruction        pixel measurement of the published
-      GEOMETRY_NOTES.md              drawing -> dimensions + petal.csv
+  [1] geometry reconstruction        pixel measurement of a published
+                                     drawing -> dimensions + petal.csv
             |
             v
   [2] full-wave model                antenna_model.m (openEMS / FDTD)
@@ -53,8 +53,6 @@ Steps 5–8 answer *what geometry would behave the way I want?*
 | `sim/ringpoly.m`, `envopt.m` | helpers: split-ring polygons, environment overrides |
 | `sim/petal.csv` | petal outline traced from Figure 1 |
 | `sim/validate_ref_patch.m` | solver sanity check against a known result |
-| `sim/GEOMETRY_NOTES.md` | every measurement, assumption and discrepancy found |
-| `sim/REVISION_PLAN.md` | prioritised list of what the paper needs before submission |
 | `sim/s11*.csv`, `sim/*.png` | results and figures |
 | `sim/ml/` | the surrogate pipeline (sampling, sweep, training, inversion) |
 
@@ -83,26 +81,10 @@ python3 train_surrogate.py      # train
 python3 inverse_design.py 5.9   # ask for a geometry that resonates at 5.9 GHz
 ```
 
-## Results so far
-
-Two independent solvers agree on the antenna's upper two bands:
-
-| Band | Paper (HFSS) | openEMS, converged |
-|---|---|---|
-| 1 | 5.74 GHz | 5.18 GHz |
-| 2 | 10.10 GHz | 10.00 GHz |
-| 3 | 11.45 GHz | 11.44 GHz |
-
-Bands 2 and 3 match to within 1%. Band 1 remains about 10% low and is still
-moving with mesh refinement. Measured −10 dB bandwidths are 84 / 241 / 130 MHz
-(1.6 / 2.4 / 1.1 %) — narrow, and not reported in the paper.
-
-See `sim/REVISION_PLAN.md` for what this implies for the manuscript.
-
 ## Caveats
 
-- The geometry was reconstructed from a published figure, not from the authors'
-  model. `sim/GEOMETRY_NOTES.md` lists what was measured and what was assumed.
+- The geometry was reconstructed from a published figure, not from the original
+  authors' model, so some dimensions are measured and others assumed.
 - The surrogate training set is generated on a deliberately coarse mesh, which
   sits 5–12% below the converged reference (`sim/ml/calibrate.py` quantifies
   this). The surrogate is a design-space navigator; anything it proposes must

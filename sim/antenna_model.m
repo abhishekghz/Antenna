@@ -5,9 +5,8 @@
 % The original study used ANSYS HFSS; this model uses openEMS (FDTD) and is
 % driven from MATLAB/Octave.
 %
-% Geometry was reconstructed from the published Figure 1 by pixel measurement
-% (see GEOMETRY_NOTES.md); dimensions the paper does not state are marked
-% ASSUMED below.
+% Geometry was reconstructed from a published figure by pixel measurement;
+% dimensions the source does not state are marked ASSUMED below.
 %
 % Run:  octave --no-gui -q antenna_model.m      (or run in MATLAB)
 
